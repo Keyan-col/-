@@ -4,6 +4,8 @@
 #include <time.h>
 #include "resource.h"
 #include <richedit.h>
+#include <gdiplus.h>
+#pragma comment(lib, "msimg32.lib")  // 用于 AlphaBlend 函数
 
 // 前向声明窗口过程函数
 LRESULT CALLBACK RoundedButtonProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -29,6 +31,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam);
 #define STATIC_CLASS L"RoundedStatic"
 #define CORNER_RADIUS 10  // 圆角半径
 #define WM_CUSTOM_PAINT (WM_USER + 1)
+#define ECO_TRANSPARENT 0x00000800L
 
 // 抽签系统结构体
 typedef struct
@@ -56,6 +59,9 @@ typedef struct {
     BOOL isHovered;
     BOOL isPressed;
 } ButtonState;
+
+// 添加全局变量用于存储背景图片
+HBITMAP g_hBackgroundBitmap = NULL;
 
 // 添加创建字体的函数
 HFONT CreateScaledFont(int height) {
@@ -525,7 +531,7 @@ void SetWinnersCount(HWND hWnd) {
         L"设置中奖人数",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
         CW_USEDEFAULT, CW_USEDEFAULT,
-        400, 250,  // 增加窗口高度到350
+        400, 220,  // 增加窗口高度到220
         hWnd, NULL, GetModuleHandle(NULL), NULL);
 
     if (!hInputWnd) {
@@ -889,6 +895,20 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
     case WM_CREATE:
     {
+        // 加载背景图片
+        g_hBackgroundBitmap = (HBITMAP)LoadImageW(
+            NULL,                   // 实例句柄
+            L"backgroundpage.bmp",  // 图片文件名
+            IMAGE_BITMAP,           // 图片类型
+            0, 0,                  // 使用图片原始尺寸
+            LR_LOADFROMFILE        // 从文件加载
+        );
+
+        if (!g_hBackgroundBitmap)
+        {
+            MessageBoxW(hWnd, L"背景图片加载失败！", L"错误", MB_OK | MB_ICONERROR);
+        }
+
         // 加载 RichEdit 库，使用 LoadLibraryW 而不是 LoadLibrary
         LoadLibraryW(L"Msftedit.dll");
         
@@ -918,29 +938,29 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
         // 进一步增大动态显示框的大小和字体
         hRollText = CreateWindowExW(
-            WS_EX_TRANSPARENT,  // 添加透明扩展样式
+            WS_EX_TRANSPARENT,  // 只使用透明扩展样式
             L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE | SS_CENTER | WS_BORDER,
+            WS_CHILD | WS_VISIBLE | SS_CENTER,
             20, 110, MIN_WINDOW_WIDTH - 40, 200,
             hWnd, NULL, NULL, NULL);
         SendMessage(hRollText, WM_SETFONT, (WPARAM)g_hLargeFont, TRUE);
 
-        // 使用 RICHEDIT 控件替代普通 EDIT 控件
+        // 修改 RichEdit 控件的创建
         hOutput = CreateWindowExW(
-            0,
+            0,  // 移除透明样式
             MSFTEDIT_CLASS,
             L"",
             WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | 
-            WS_VSCROLL | ES_AUTOVSCROLL | WS_BORDER,
+            WS_VSCROLL | ES_AUTOVSCROLL,
             20, 330,
             MIN_WINDOW_WIDTH - 40, MIN_WINDOW_HEIGHT - 420,
             hWnd, NULL, NULL, NULL);
         SendMessage(hOutput, WM_SETFONT, (WPARAM)g_hSmallFont, TRUE);
 
-        // 设置 RichEdit 的背景色为白色
-        SendMessage(hOutput, EM_SETBKGNDCOLOR, 0, (LPARAM)RGB(255, 255, 255));
+        // 修改 RichEdit 控件的背景色设置
+        SendMessage(hOutput, EM_SETBKGNDCOLOR, 0, (LPARAM)0x80FFFFFF);  // 设置半透明白色背景
         
-        // 设置文本颜色为黑色
+        // 设置文本颜色
         CHARFORMAT2 cf;
         ZeroMemory(&cf, sizeof(cf));
         cf.cbSize = sizeof(cf);
@@ -1049,6 +1069,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
     case WM_DESTROY:
     {
+        // 删除背景图片
+        if (g_hBackgroundBitmap)
+        {
+            DeleteObject(g_hBackgroundBitmap);
+            g_hBackgroundBitmap = NULL;
+        }
+
         // 清理字体资源
         HFONT hCaptionFont = (HFONT)GetWindowLongPtr(hWnd, GWLP_USERDATA);
         if (hCaptionFont) DeleteObject(hCaptionFont);
@@ -1139,29 +1166,91 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         LPDRAWITEMSTRUCT lpDIS = (LPDRAWITEMSTRUCT)lParam;
         if (lpDIS->CtlType == ODT_BUTTON) 
         {
-            // 创建圆角矩形路径
+            RECT rect = lpDIS->rcItem;
+            
+            // 获取按钮在父窗口中的位置
+            POINT pt = {rect.left, rect.top};
+            MapWindowPoints(lpDIS->hwndItem, GetParent(lpDIS->hwndItem), &pt, 1);
+
+            // 创建内存DC
+            HDC hdcMem = CreateCompatibleDC(lpDIS->hDC);
+            HBITMAP hBitmap = CreateCompatibleBitmap(lpDIS->hDC, 
+                rect.right - rect.left, rect.bottom - rect.top);
+            HBITMAP hOldBitmap = (HBITMAP)SelectObject(hdcMem, hBitmap);
+
+            // 如果有背景图片，先绘制背景
+            if (g_hBackgroundBitmap)
+            {
+                HDC hdcBg = CreateCompatibleDC(lpDIS->hDC);
+                SelectObject(hdcBg, g_hBackgroundBitmap);
+                
+                // 获取背景图片信息
+                BITMAP bm;
+                GetObject(g_hBackgroundBitmap, sizeof(BITMAP), &bm);
+                
+                // 计算缩放比例
+                RECT parentRect;
+                GetClientRect(GetParent(lpDIS->hwndItem), &parentRect);
+                float scaleX = (float)parentRect.right / bm.bmWidth;
+                float scaleY = (float)parentRect.bottom / bm.bmHeight;
+                
+                // 计算背景图片在按钮区域的对应部分
+                StretchBlt(hdcMem, 0, 0, rect.right - rect.left, rect.bottom - rect.top,
+                          hdcBg, (int)(pt.x / scaleX), (int)(pt.y / scaleY),
+                          (int)((rect.right - rect.left) / scaleX),
+                          (int)((rect.bottom - rect.top) / scaleY),
+                          SRCCOPY);
+                
+                DeleteDC(hdcBg);
+            }
+
+            // 创建半透明效果
             HBRUSH hBrush;
             if (lpDIS->itemState & ODS_SELECTED)
-                hBrush = CreateSolidBrush(RGB(240, 240, 240));  // 按下状态
+                hBrush = CreateSolidBrush(RGB(180, 180, 180));
             else if (lpDIS->itemState & ODS_HOTLIGHT)
-                hBrush = CreateSolidBrush(RGB(248, 248, 248));  // 悬停状态
+                hBrush = CreateSolidBrush(RGB(220, 220, 220));
             else
-                hBrush = CreateSolidBrush(RGB(255, 255, 255));  // 正常状态
+                hBrush = CreateSolidBrush(RGB(240, 240, 240));
 
-            // 先填充白色背景
-            RECT rect = lpDIS->rcItem;
-            FillRect(lpDIS->hDC, &rect, (HBRUSH)GetStockObject(WHITE_BRUSH));
-            
-            SelectObject(lpDIS->hDC, hBrush);
-            RoundRect(lpDIS->hDC, rect.left, rect.top, rect.right, rect.bottom, 20, 20);
-            DeleteObject(hBrush);
+            // 设置混合模式
+            BLENDFUNCTION bf = {AC_SRC_OVER, 0, 100, 0};  // 调整透明度
+
+            // 创建临时DC用于绘制按钮
+            HDC hdcTemp = CreateCompatibleDC(lpDIS->hDC);
+            HBITMAP hBitmapTemp = CreateCompatibleBitmap(lpDIS->hDC,
+                rect.right - rect.left, rect.bottom - rect.top);
+            HBITMAP hOldBitmapTemp = (HBITMAP)SelectObject(hdcTemp, hBitmapTemp);
+
+            // 绘制圆角矩形
+            SelectObject(hdcTemp, hBrush);
+            RoundRect(hdcTemp, 0, 0, rect.right - rect.left,
+                rect.bottom - rect.top, 20, 20);
+
+            // 将按钮与背景混合
+            AlphaBlend(hdcMem, 0, 0, rect.right - rect.left, rect.bottom - rect.top,
+                      hdcTemp, 0, 0, rect.right - rect.left, rect.bottom - rect.top, bf);
+
+            // 将最终结果复制到按钮DC
+            BitBlt(lpDIS->hDC, 0, 0, rect.right - rect.left, rect.bottom - rect.top,
+                   hdcMem, 0, 0, SRCCOPY);
 
             // 绘制文本
             wchar_t text[256];
             GetWindowTextW(lpDIS->hwndItem, text, 256);
             SetBkMode(lpDIS->hDC, TRANSPARENT);
             SelectObject(lpDIS->hDC, g_hFont);
+            SetTextColor(lpDIS->hDC, RGB(0, 0, 0));
             DrawTextW(lpDIS->hDC, text, -1, &rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+            // 清理资源
+            DeleteObject(hBrush);
+            SelectObject(hdcTemp, hOldBitmapTemp);
+            DeleteObject(hBitmapTemp);
+            DeleteDC(hdcTemp);
+            SelectObject(hdcMem, hOldBitmap);
+            DeleteObject(hBitmap);
+            DeleteDC(hdcMem);
 
             return TRUE;
         }
@@ -1175,14 +1264,66 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         
         if (hwndStatic == hRollText)
         {
-            SetTextColor(hdcStatic, RGB(0, 0, 0));  // 文本颜色设为黑色
-            SetBkColor(hdcStatic, RGB(255, 255, 255));  // 背景色设为白色
+            SetTextColor(hdcStatic, RGB(0, 0, 0));
+            SetBkMode(hdcStatic, TRANSPARENT);
+            
+            // 创建半透明画刷
             static HBRUSH hBrush = NULL;
             if (!hBrush)
-                hBrush = CreateSolidBrush(RGB(255, 255, 255));
+            {
+                LOGBRUSH lb;
+                lb.lbStyle = BS_SOLID;
+                lb.lbColor = RGB(255, 255, 255);
+                lb.lbHatch = 0;
+                hBrush = CreateBrushIndirect(&lb);
+            }
+            
+            // 设置画刷的透明度
+            BLENDFUNCTION bf = {AC_SRC_OVER, 0, 128, 0};  // 128 是 50% 的透明度
+            HDC hdcScreen = GetDC(NULL);
+            AlphaBlend(hdcStatic, 0, 0, 1, 1, hdcScreen, 0, 0, 1, 1, bf);
+            ReleaseDC(NULL, hdcScreen);
+            
             return (LRESULT)hBrush;
         }
         return DefWindowProc(hWnd, message, wParam, lParam);
+    }
+
+    case WM_ERASEBKGND:
+    {
+        if (g_hBackgroundBitmap)
+        {
+            HDC hdc = (HDC)wParam;
+            HDC hdcMem = CreateCompatibleDC(hdc);
+            HBITMAP hOldBitmap = (HBITMAP)SelectObject(hdcMem, g_hBackgroundBitmap);
+
+            RECT rect;
+            GetClientRect(hWnd, &rect);
+            
+            BITMAP bm;
+            GetObject(g_hBackgroundBitmap, sizeof(BITMAP), &bm);
+
+            // 拉伸绘制背景图片
+            SetStretchBltMode(hdc, HALFTONE);
+            StretchBlt(hdc, 0, 0, rect.right, rect.bottom,
+                      hdcMem, 0, 0, bm.bmWidth, bm.bmHeight, SRCCOPY);
+
+            SelectObject(hdcMem, hOldBitmap);
+            DeleteDC(hdcMem);
+            return TRUE;
+        }
+        return DefWindowProc(hWnd, message, wParam, lParam);
+    }
+
+    case WM_PAINT:
+    {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint(hWnd, &ps);
+        
+        // 如果需要，在这里添加其他绘制代码
+        
+        EndPaint(hWnd, &ps);
+        return 0;
     }
 
     default:
